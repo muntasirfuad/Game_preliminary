@@ -153,12 +153,10 @@ static int setSizes[5]={10, 10, 10, 10, 10};
 static QuizQuestion *currentQuestions;
 static int currentSetSize;
 static int currentQuestion;
-static int selectedOption;
 static int puzzleState;
 static int lives;
 static int score;
-static float timer;
-static const float TIME_LIMIT=15.0f;
+static float wrongFlash;
 static int chapter;
 static int questionsPerChapter;
 
@@ -220,20 +218,27 @@ void InitPuzzleSystem(int ch){
     }
 
     currentQuestion=0;
-    selectedOption=0;
     lives=3;
     score=0;
-    timer=TIME_LIMIT;
+    wrongFlash=0.0f;
     puzzleState=0;
 }
 
 void UpdatePuzzleSystem(void){
-    if(puzzleState!=0){
-        if(IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
-            puzzleState=1;
+    // Click anywhere after reading a completion screen.
+    if(puzzleState==1){
+        if(IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+            puzzleState=3;
         }
         return;
     }
+    if(puzzleState==2){
+        if(IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+            puzzleState=4;
+        }
+        return;
+    }
+    if(puzzleState!=0) return;
 
     if(currentQuestion>=questionsPerChapter){
         puzzleState=1;
@@ -241,48 +246,29 @@ void UpdatePuzzleSystem(void){
     }
 
     QuizQuestion *q=&currentQuestions[currentQuestion];
+    if(wrongFlash>0.0f) wrongFlash-=GetFrameTime();
 
-    // Time is not your ally here. It never was.
-    timer-=GetFrameTime();
-    if(timer<=0){
-        timer=0;
-        lives--;
-        if(lives<=0){
-            puzzleState=2;
-            return;
-        }
-        currentQuestion++;
-        timer=TIME_LIMIT;
-        selectedOption=0;
-        return;
-    }
-
-    // Navigate the choices. One of them is true. The others are distractions.
-    if(IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)){
-        selectedOption--;
-        if(selectedOption<0) selectedOption=3;
-    }
-    if(IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)){
-        selectedOption++;
-        if(selectedOption>3) selectedOption=0;
-    }
-
-    // Commit to your answer. There is no undoing what you choose.
-    if(IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
-        if(selectedOption==q->correctAnswer){
-            score++;
-            currentQuestion++;
-            timer=TIME_LIMIT;
-            selectedOption=0;
-        } else {
-            lives--;
-            if(lives<=0){
-                puzzleState=2;
-                return;
+    // Each answer is plain clickable text; no keyboard selection is needed.
+    if(IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+        Vector2 mouse=GetMousePosition();
+        for(int i=0;i<4;i++){
+            Rectangle answerArea={210,(float)(355+i*75),860,58};
+            if(CheckCollisionPointRec(mouse,answerArea)){
+                if(i==q->correctAnswer){
+                    score++;
+                    currentQuestion++;
+                    wrongFlash=0.0f;
+                }else{
+                    lives--;
+                    if(lives<=0){
+                        puzzleState=2;
+                        return;
+                    }
+                    // A wrong answer costs a life; the same question remains.
+                    wrongFlash=1.25f;
+                }
+                break;
             }
-            currentQuestion++;
-            timer=TIME_LIMIT;
-            selectedOption=0;
         }
     }
 }
@@ -300,42 +286,36 @@ void DrawPuzzleSystem(void){
         // Lives. You start with three. Most people lose the first one without noticing.
         DrawText("LIVES: ", 50, 90, 24, WHITE);
         for(int i=0; i<3; i++){
-            Color heartColor=(i<lives) ? RED : DARKGRAY;
+            Color heartColor;
+            if(i<lives)heartColor=RED;
+            else heartColor=DARKGRAY;
             DrawText("<3", 140+(i*40), 90, 24, heartColor);
         }
 
         DrawText(TextFormat("SCORE: %d / %d", score, questionsPerChapter), 1000, 90, 24, GREEN);
         DrawText(TextFormat("QUESTION %d / %d", currentQuestion+1, questionsPerChapter), 520, 90, 24, WHITE);
 
-        // Timer. It runs out the way all things run out — quietly, then all at once.
-        DrawRectangle(100, 140, 1080, 25, DARKGRAY);
-        float timerPct=timer/TIME_LIMIT;
-        Color timerColor=(timerPct>0.5f) ? GREEN : (timerPct>0.25f) ? YELLOW : RED;
-        DrawRectangle(100, 140, 1080*timerPct, 25, timerColor);
-        DrawText(TextFormat("%.1fs", timer), 615, 143, 20, BLACK);
+        if(wrongFlash>0.0f){
+            DrawText("WRONG ANSWER - TRY THIS QUESTION AGAIN", 390, 150, 24, RED);
+        }
 
         // The question. Read it carefully. The answer is always in the asking.
         DrawRectangle(80, 190, 1120, 140, (Color){25, 25, 45, 255});
         DrawRectangleLinesEx((Rectangle){80, 190, 1120, 140}, 3, GOLD);
         DrawWrapped(q->question, 120, 220, 1040, 26, WHITE);
 
-        // Four doors. One opens. Three do not.
+        // Four plain text answers. Hover changes only the text color.
         const char *labels[]={"A", "B", "C", "D"};
+        Vector2 mouse=GetMousePosition();
         for(int i=0; i<4; i++){
-            int y=360+(i*85);
-            Color bgColor=(i==selectedOption) ? (Color){70, 70, 120, 255} : (Color){30, 30, 55, 255};
-            Color borderColor=(i==selectedOption) ? GOLD : DARKGRAY;
-
-            DrawRectangle(180, y, 920, 75, bgColor);
-            DrawRectangleLinesEx((Rectangle){180, y, 920, 75}, 3, borderColor);
-
-            DrawCircle(230, y+37, 25, (i==selectedOption) ? GOLD : DARKGRAY);
-            DrawText(labels[i], 222, y+28, 24, BLACK);
-
-            DrawText(q->options[i], 280, y+22, 22, WHITE);
+            int y=355+(i*75);
+            Rectangle answerArea={210,(float)y,860,58};
+            Color textColor;
+            if(CheckCollisionPointRec(mouse,answerArea))textColor=GOLD;
+            else textColor=WHITE;
+            DrawText(TextFormat("%s.  %s",labels[i],q->options[i]),220,y+16,22,textColor);
         }
-
-        DrawText("[UP/DOWN] Navigate  [ENTER] Select", 430, 710, 20, GRAY);
+        DrawText("Click an answer",555,680,18,GRAY);
     }
 
     // The trial is complete. Whether you passed depends on what you brought with you.
@@ -356,7 +336,7 @@ void DrawPuzzleSystem(void){
             }
         }
 
-        DrawText("Press ENTER to continue", 440, 550, 28, WHITE);
+        DrawText("Click anywhere to continue", 425, 550, 28, WHITE);
     }
 
     // The trial has failed. Some doors, once closed, do not open again.
@@ -366,13 +346,15 @@ void DrawPuzzleSystem(void){
         DrawText("You have lost all your lives.", 420, 300, 32, ORANGE);
         DrawText(TextFormat("Questions answered correctly: %d / %d", score, questionsPerChapter), 350, 370, 28, WHITE);
 
-        DrawText("The door remains closed...", 430, 450, 28, DARKGRAY);
-        DrawText("Press ENTER to retry", 460, 550, 28, WHITE);
+        DrawText("The trial is lost. You must fight to continue.", 330, 450, 28, ORANGE);
+        DrawText("Click anywhere to begin the fight", 370, 550, 28, WHITE);
     }
 }
 
 int IsPuzzleFinished(void){
-    return puzzleState;
+    if(puzzleState==3) return 1; // Quiz passed and confirmed.
+    if(puzzleState==4) return 2; // Quiz failed: start this chapter's fight.
+    return 0;
 }
 
 int GetPuzzleScore(void){
