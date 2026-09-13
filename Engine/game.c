@@ -1,7 +1,5 @@
 #include "raylib.h"
 #include "game.h"
-#include "loading.h"
-#include "cinematic.h"
 #include "intro.h"
 #include "dialogue.h"
 #include "scene_ch1_forest.h"
@@ -12,37 +10,28 @@
 #include "ending_bad.h"
 #include "ending_good.h"
 #include "ending_secret.h"
-#include "door_system.h"
 #include "battle_system.h"
 #include "puzzle_system.h"
+#include <stdio.h>
 
-// ============================================
-// GAME STATE
-// The journey has stages. Each one costs something.
-// ============================================
 typedef enum{
-    STATE_LOADING,
-    STATE_CINEMATIC,
     STATE_TITLE,
     STATE_PROLOGUE,
+    STATE_CHAPTER_CARD,
     STATE_CHAPTER1_FOREST,
-    STATE_CH1_DOOR,
+    STATE_ROUTE_CHOICE,
     STATE_CH1_BATTLE,
     STATE_CH1_PUZZLE,
     STATE_CHAPTER2_VILLAGE,
-    STATE_CH2_DOOR,
     STATE_CH2_BATTLE,
     STATE_CH2_PUZZLE,
     STATE_CHAPTER3_DIARY,
-    STATE_CH3_DOOR,
     STATE_CH3_BATTLE,
     STATE_CH3_PUZZLE,
     STATE_CHAPTER4_TRUTH,
-    STATE_CH4_DOOR,
     STATE_CH4_BATTLE,
     STATE_CH4_PUZZLE,
     STATE_CHAPTER5_FINAL,
-    STATE_CH5_DOOR,
     STATE_CH5_BATTLE,
     STATE_CH5_PUZZLE,
     STATE_CHOICE,
@@ -50,16 +39,100 @@ typedef enum{
     STATE_REVENGE_BOSS_BATTLE,
     STATE_ENDING_BAD,
     STATE_ENDING_GOOD,
-    STATE_ENDING_SECRET
+    STATE_ENDING_SECRET,
+    STATE_THE_END
 }GameState;
 
 static GameState state;
 static int choiceSelected;
+static int routeChapter;
+static int routeSelected;
+static bool quitRequested;
+static int pendingChapter;
+static float chapterCardTimer;
+static Music backgroundMusic;
+static Sound typingSound;
+static bool audioLoaded;
+
+static const char *AudioPath(const char *name){
+    static char rooted[160];
+    if(FileExists(name))return name;
+    snprintf(rooted,sizeof(rooted),"src/%s",name);
+    if(FileExists(rooted))return rooted;
+    else return name;
+}
+
+static bool IsDialogueState(GameState value){
+    return value==STATE_PROLOGUE||value==STATE_CHAPTER1_FOREST||value==STATE_CHAPTER2_VILLAGE||value==STATE_CHAPTER3_DIARY||value==STATE_CHAPTER4_TRUTH||value==STATE_CHAPTER5_FINAL||value==STATE_ENDING_BAD||value==STATE_ENDING_GOOD||value==STATE_ENDING_SECRET;
+}
+
+static void PlayTyping(void){
+    if(!audioLoaded||typingSound.frameCount==0)return;
+    StopSound(typingSound);
+    PlaySound(typingSound);
+}
+
+static void OpenRouteChoice(int chapter){
+    routeChapter=chapter;
+    routeSelected=-1;
+    state=STATE_ROUTE_CHOICE;
+}
+
+static GameState BattleStateFor(int chapter){
+    static const GameState states[5]={STATE_CH1_BATTLE,STATE_CH2_BATTLE,
+        STATE_CH3_BATTLE,STATE_CH4_BATTLE,STATE_CH5_BATTLE};
+    return states[chapter-1];
+}
+
+static GameState PuzzleStateFor(int chapter){
+    static const GameState states[5]={STATE_CH1_PUZZLE,STATE_CH2_PUZZLE,
+        STATE_CH3_PUZZLE,STATE_CH4_PUZZLE,STATE_CH5_PUZZLE};
+    return states[chapter-1];
+}
+
+static void ShowChapterCard(int chapter){
+    pendingChapter=chapter;
+    chapterCardTimer=2.0f;
+    state=STATE_CHAPTER_CARD;
+}
+
+static void OpenChapterDialogue(int chapter){
+    if(chapter==1){
+        InitDialogueCh1();
+        state=STATE_CHAPTER1_FOREST;
+    }
+    else if(chapter==2){
+        InitDialogueCh2();
+        state=STATE_CHAPTER2_VILLAGE;
+    }
+    else if(chapter==3){
+        InitDialogueCh3();
+        state=STATE_CHAPTER3_DIARY;
+    }
+    else if(chapter==4){
+        InitDialogueCh4();
+        state=STATE_CHAPTER4_TRUTH;
+    }
+    else{
+        InitDialogueCh5();
+        state=STATE_CHAPTER5_FINAL;
+    }
+}
 
 void InitGame(void){
-    state=STATE_LOADING;
+    state=STATE_TITLE;
     choiceSelected=0;
-    InitLoadingScreen();
+    quitRequested=false;
+    backgroundMusic=LoadMusicStream(AudioPath("main_theme.wav"));
+    typingSound=LoadSound(AudioPath("typing.mp3"));
+    audioLoaded=backgroundMusic.frameCount>0||typingSound.frameCount>0;
+    if(backgroundMusic.frameCount>0){
+        backgroundMusic.looping=true;
+        SetMusicVolume(backgroundMusic,0.75f);
+        PlayMusicStream(backgroundMusic);
+    }
+    if(typingSound.frameCount>0)SetSoundVolume(typingSound,0.28f);
+    InitIntro();
 }
 
 // ============================================
@@ -67,25 +140,10 @@ void InitGame(void){
 // Time moves forward. The game does not wait for you to be ready.
 // ============================================
 void UpdateGame(void){
+    if(backgroundMusic.frameCount>0)UpdateMusicStream(backgroundMusic);
+    GameState stateBefore=state;
+    bool dialogueAdvanced=IsDialogueState(state)&&IsKeyPressed(KEY_SPACE);
     switch(state){
-        // --- LOADING ---
-        case STATE_LOADING:
-            UpdateLoadingScreen();
-            if(IsLoadingDone()){
-                InitCinematic();
-                state=STATE_CINEMATIC;
-            }
-            break;
-
-        // --- CINEMATIC ---
-        case STATE_CINEMATIC:
-            UpdateCinematic();
-            if(IsCinematicDone()){
-                InitIntro();
-                state=STATE_TITLE;
-            }
-            break;
-
         // --- TITLE ---
         case STATE_TITLE:
             UpdateIntro();
@@ -100,7 +158,7 @@ void UpdateGame(void){
                     state=STATE_PROLOGUE;
                 }
                 else if(introRes==3){     // QUIT
-                    // Handled in main.c via ShouldGameQuit() if you add it
+                    quitRequested=true;
                 }
             }
             break;
@@ -110,9 +168,14 @@ void UpdateGame(void){
             UpdateDialogue();
             if(IsDialogueFinished()){
                 CloseDialogue();
-                InitDialogueCh1();
-                state=STATE_CHAPTER1_FOREST;
+                ShowChapterCard(1);
             }
+            break;
+
+        case STATE_CHAPTER_CARD:
+            chapterCardTimer-=GetFrameTime();
+            if(chapterCardTimer<=0||IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+                OpenChapterDialogue(pendingChapter);
             break;
 
         // --- CHAPTER 1 ---
@@ -120,39 +183,49 @@ void UpdateGame(void){
             UpdateDialogueCh1();
             if(IsDialogueFinishedCh1()){
                 CloseDialogueCh1();
-                InitDoorSystem();
-                state=STATE_CH1_DOOR;
+                OpenRouteChoice(1);
             }
             break;
 
-        case STATE_CH1_DOOR:
-            UpdateDoorSystem();
-            {
-                int doorResult=IsDoorSystemFinished();
-                if(doorResult==1){
-                    InitBattleSystem(1);
-                    state=STATE_CH1_BATTLE;
+        case STATE_ROUTE_CHOICE:{
+            Vector2 mouse=GetMousePosition();
+            Rectangle fightButton={330,320,280,70};
+            Rectangle quizButton={670,320,280,70};
+            if(CheckCollisionPointRec(mouse,fightButton))routeSelected=0;
+            else if(CheckCollisionPointRec(mouse,quizButton))routeSelected=1;
+            else routeSelected=-1;
+            if(IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+                if(routeSelected==0){
+                    InitBattleSystem(routeChapter);
+                    state=BattleStateFor(routeChapter);
                 }
-                else if(doorResult==2){
-                    InitPuzzleSystem(1);
-                    state=STATE_CH1_PUZZLE;
+                else if(routeSelected==1){
+                    InitPuzzleSystem(routeChapter);
+                    state=PuzzleStateFor(routeChapter);
                 }
             }
             break;
+        }
 
         case STATE_CH1_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){
-                InitDialogueCh2();
-                state=STATE_CHAPTER2_VILLAGE;
+            if(IsBattleFinished()==1){
+                ShowChapterCard(2);
+            }
+            else if(IsBattleFinished()==-1){
+                InitPuzzleSystem(1);
+                state=STATE_CH1_PUZZLE;
             }
             break;
 
         case STATE_CH1_PUZZLE:
             UpdatePuzzleSystem();
-            if(IsPuzzleFinished()!=0){
-                InitDialogueCh2();
-                state=STATE_CHAPTER2_VILLAGE;
+            if(IsPuzzleFinished()==1){
+                ShowChapterCard(2);
+            }
+            else if(IsPuzzleFinished()==2){
+                InitBattleSystem(1);
+                state=STATE_CH1_BATTLE;
             }
             break;
 
@@ -161,39 +234,29 @@ void UpdateGame(void){
             UpdateDialogueCh2();
             if(IsDialogueFinishedCh2()){
                 CloseDialogueCh2();
-                InitDoorSystem();
-                state=STATE_CH2_DOOR;
-            }
-            break;
-
-        case STATE_CH2_DOOR:
-            UpdateDoorSystem();
-            {
-                int doorResult=IsDoorSystemFinished();
-                if(doorResult==1){
-                    InitBattleSystem(2);
-                    state=STATE_CH2_BATTLE;
-                }
-                else if(doorResult==2){
-                    InitPuzzleSystem(2);
-                    state=STATE_CH2_PUZZLE;
-                }
+                OpenRouteChoice(2);
             }
             break;
 
         case STATE_CH2_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){
-                InitDialogueCh3();
-                state=STATE_CHAPTER3_DIARY;
+            if(IsBattleFinished()==1){
+                ShowChapterCard(3);
+            }
+            else if(IsBattleFinished()==-1){
+                InitPuzzleSystem(2);
+                state=STATE_CH2_PUZZLE;
             }
             break;
 
         case STATE_CH2_PUZZLE:
             UpdatePuzzleSystem();
-            if(IsPuzzleFinished()!=0){
-                InitDialogueCh3();
-                state=STATE_CHAPTER3_DIARY;
+            if(IsPuzzleFinished()==1){
+                ShowChapterCard(3);
+            }
+            else if(IsPuzzleFinished()==2){
+                InitBattleSystem(2);
+                state=STATE_CH2_BATTLE;
             }
             break;
 
@@ -202,39 +265,29 @@ void UpdateGame(void){
             UpdateDialogueCh3();
             if(IsDialogueFinishedCh3()){
                 CloseDialogueCh3();
-                InitDoorSystem();
-                state=STATE_CH3_DOOR;
-            }
-            break;
-
-        case STATE_CH3_DOOR:
-            UpdateDoorSystem();
-            {
-                int doorResult=IsDoorSystemFinished();
-                if(doorResult==1){
-                    InitBattleSystem(3);
-                    state=STATE_CH3_BATTLE;
-                }
-                else if(doorResult==2){
-                    InitPuzzleSystem(3);
-                    state=STATE_CH3_PUZZLE;
-                }
+                OpenRouteChoice(3);
             }
             break;
 
         case STATE_CH3_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){
-                InitDialogueCh4();
-                state=STATE_CHAPTER4_TRUTH;
+            if(IsBattleFinished()==1){
+                ShowChapterCard(4);
+            }
+            else if(IsBattleFinished()==-1){
+                InitPuzzleSystem(3);
+                state=STATE_CH3_PUZZLE;
             }
             break;
 
         case STATE_CH3_PUZZLE:
             UpdatePuzzleSystem();
-            if(IsPuzzleFinished()!=0){
-                InitDialogueCh4();
-                state=STATE_CHAPTER4_TRUTH;
+            if(IsPuzzleFinished()==1){
+                ShowChapterCard(4);
+            }
+            else if(IsPuzzleFinished()==2){
+                InitBattleSystem(3);
+                state=STATE_CH3_BATTLE;
             }
             break;
 
@@ -243,39 +296,29 @@ void UpdateGame(void){
             UpdateDialogueCh4();
             if(IsDialogueFinishedCh4()){
                 CloseDialogueCh4();
-                InitDoorSystem();
-                state=STATE_CH4_DOOR;
-            }
-            break;
-
-        case STATE_CH4_DOOR:
-            UpdateDoorSystem();
-            {
-                int doorResult=IsDoorSystemFinished();
-                if(doorResult==1){
-                    InitBattleSystem(4);
-                    state=STATE_CH4_BATTLE;
-                }
-                else if(doorResult==2){
-                    InitPuzzleSystem(4);
-                    state=STATE_CH4_PUZZLE;
-                }
+                OpenRouteChoice(4);
             }
             break;
 
         case STATE_CH4_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){
-                InitDialogueCh5();
-                state=STATE_CHAPTER5_FINAL;
+            if(IsBattleFinished()==1){
+                ShowChapterCard(5);
+            }
+            else if(IsBattleFinished()==-1){
+                InitPuzzleSystem(4);
+                state=STATE_CH4_PUZZLE;
             }
             break;
 
         case STATE_CH4_PUZZLE:
             UpdatePuzzleSystem();
-            if(IsPuzzleFinished()!=0){
-                InitDialogueCh5();
-                state=STATE_CHAPTER5_FINAL;
+            if(IsPuzzleFinished()==1){
+                ShowChapterCard(5);
+            }
+            else if(IsPuzzleFinished()==2){
+                InitBattleSystem(4);
+                state=STATE_CH4_BATTLE;
             }
             break;
 
@@ -284,109 +327,115 @@ void UpdateGame(void){
             UpdateDialogueCh5();
             if(IsDialogueFinishedCh5()){
                 CloseDialogueCh5();
-                InitDoorSystem();
-                state=STATE_CH5_DOOR;
-            }
-            break;
-
-        case STATE_CH5_DOOR:
-            UpdateDoorSystem();
-            {
-                int doorResult=IsDoorSystemFinished();
-                if(doorResult==1){
-                    InitBattleSystem(5);
-                    state=STATE_CH5_BATTLE;
-                }
-                else if(doorResult==2){
-                    InitPuzzleSystem(5);
-                    state=STATE_CH5_PUZZLE;
-                }
+                OpenRouteChoice(5);
             }
             break;
 
         case STATE_CH5_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){
+            if(IsBattleFinished()==1){
                 choiceSelected=0;
                 state=STATE_CHOICE;
+            }
+            else if(IsBattleFinished()==-1){
+                InitPuzzleSystem(5);
+                state=STATE_CH5_PUZZLE;
             }
             break;
 
         case STATE_CH5_PUZZLE:
             UpdatePuzzleSystem();
-            if(IsPuzzleFinished()!=0){
+            if(IsPuzzleFinished()==1){
                 choiceSelected=0;
                 state=STATE_CHOICE;
+            }
+            else if(IsPuzzleFinished()==2){
+                InitBattleSystem(5);
+                state=STATE_CH5_BATTLE;
             }
             break;
 
         // --- CHOICE ---
         case STATE_CHOICE:
-            if(IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)){
-                choiceSelected--;
-                if(choiceSelected<0) choiceSelected=2;
+            {
+                Vector2 mouse=GetMousePosition();
+                choiceSelected=-1;
+                for(int i=0;i<3;i++)if(CheckCollisionPointRec(mouse,(Rectangle){300,275+i*90,680,64}))choiceSelected=i;
             }
-            if(IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)){
-                choiceSelected++;
-                if(choiceSelected>2) choiceSelected=0;
-            }
-            if(IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)){
+            if(IsMouseButtonPressed(MOUSE_LEFT_BUTTON)&&choiceSelected>=0){
                 if(choiceSelected==0){
-                    InitBattleSystem(6);
-                    state=STATE_BAD_ENDING_BATTLE;
+                    InitDialogueBad();
+                    state=STATE_ENDING_BAD;
                 }
                 else if(choiceSelected==1){
                     InitDialogueGood();
                     state=STATE_ENDING_GOOD;
                 }
                 else{
-                    InitBattleSystem(7);
-                    state=STATE_REVENGE_BOSS_BATTLE;
+                    InitDialogueSecret();
+                    state=STATE_ENDING_SECRET;
                 }
             }
             break;
 
         case STATE_BAD_ENDING_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){InitDialogueBad();state=STATE_ENDING_BAD;}
+            if(IsBattleFinished()==1) state=STATE_THE_END;
+            else if(IsBattleFinished()==-1) InitBattleSystem(6);
             break;
 
         case STATE_REVENGE_BOSS_BATTLE:
             UpdateBattleSystem();
-            if(IsBattleFinished()!=0){InitDialogueSecret();state=STATE_ENDING_SECRET;}
+            if(IsBattleFinished()==1) state=STATE_THE_END;
+            else if(IsBattleFinished()==-1) InitBattleSystem(7);
             break;
 
         case STATE_ENDING_BAD:
             UpdateDialogueBad();
+            if(IsDialogueFinishedBad()){
+                CloseDialogueBad();
+                InitBattleSystem(6);
+                state=STATE_BAD_ENDING_BATTLE;
+            }
             break;
 
         case STATE_ENDING_GOOD:
             UpdateDialogueGood();
+            if(IsDialogueFinishedGood()){
+                CloseDialogueGood();
+                state=STATE_THE_END;
+            }
             break;
 
         case STATE_ENDING_SECRET:
             UpdateDialogueSecret();
+            if(IsDialogueFinishedSecret()){
+                CloseDialogueSecret();
+                InitBattleSystem(7);
+                state=STATE_REVENGE_BOSS_BATTLE;
+            }
+            break;
+
+        case STATE_THE_END:
             break;
 
         default:
             break;
+    }
+    if(state!=stateBefore){
+        if(typingSound.frameCount>0)StopSound(typingSound);
+        if(IsDialogueState(state))PlayTyping();
+    }else if(dialogueAdvanced&&IsDialogueState(state)){
+        PlayTyping();
     }
 }
 
 // ============================================
 // DRAW
 // What you see is what the world chooses to show you.
-// ============================================
+// ============================================                                                                                       
 void DrawGame(void){
     switch(state){
-        case STATE_LOADING:
-            DrawLoadingScreen();
-            break;
-
-        case STATE_CINEMATIC:
-            DrawCinematic();
-            break;
-
         case STATE_TITLE:
             DrawIntro();
             break;
@@ -395,13 +444,47 @@ void DrawGame(void){
             DrawDialogueBox();
             break;
 
+        case STATE_CHAPTER_CARD:{
+            static const char *numbers[5]={"CHAPTER I","CHAPTER II","CHAPTER III","CHAPTER IV","CHAPTER V"};
+            static const char *names[5]={"THE KING'S CALL","ASH DOES NOT LIE","THE DIARY PAGES","TRUTH BURNS","THE FORGOTTEN OATH"};
+            int chapter;
+            if(pendingChapter<1)chapter=1;
+            else if(pendingChapter>5)chapter=5;
+            else chapter=pendingChapter;
+            ClearBackground((Color){8,8,11,255});
+            const char *number=numbers[chapter-1],*name=names[chapter-1];
+            DrawText(number,640-MeasureText(number,48)/2,265,48,GOLD);
+            DrawText(name,640-MeasureText(name,25)/2,335,25,(Color){235,220,190,255});
+            break;
+        }
+
         case STATE_CHAPTER1_FOREST:
             DrawDialogueBoxCh1();
             break;
 
-        case STATE_CH1_DOOR:
-            DrawDoorSystem();
+        case STATE_ROUTE_CHOICE:{
+            ClearBackground((Color){12,12,18,255});
+            const char *title=TextFormat("CHAPTER %d - CHOOSE YOUR TRIAL",routeChapter);
+            DrawText(title,640-MeasureText(title,34)/2,190,34,GOLD);
+            Rectangle fightButton={330,320,280,70};
+            Rectangle quizButton={670,320,280,70};
+            Color fightColor;
+            Color quizColor;
+            Color fightBorder;
+            Color quizBorder;
+            if(routeSelected==0){fightColor=(Color){125,45,40,255};fightBorder=GOLD;}
+            else{fightColor=(Color){40,35,38,255};fightBorder=GRAY;}
+            if(routeSelected==1){quizColor=(Color){55,90,135,255};quizBorder=GOLD;}
+            else{quizColor=(Color){40,35,38,255};quizBorder=GRAY;}
+            DrawRectangleRounded(fightButton,.15f,6,fightColor);
+            DrawRectangleRounded(quizButton,.15f,6,quizColor);
+            DrawRectangleRoundedLinesEx(fightButton,.15f,6,2,fightBorder);
+            DrawRectangleRoundedLinesEx(quizButton,.15f,6,2,quizBorder);
+            DrawText("FIGHT",430,342,28,RAYWHITE);
+            DrawText("QUIZ",775,342,28,RAYWHITE);
+            DrawText("Clear either trial to continue",462,440,22,LIGHTGRAY);
             break;
+        }
 
         case STATE_CH1_BATTLE:
             DrawBattleSystem();
@@ -413,10 +496,6 @@ void DrawGame(void){
 
         case STATE_CHAPTER2_VILLAGE:
             DrawDialogueBoxCh2();
-            break;
-
-        case STATE_CH2_DOOR:
-            DrawDoorSystem();
             break;
 
         case STATE_CH2_BATTLE:
@@ -431,10 +510,6 @@ void DrawGame(void){
             DrawDialogueBoxCh3();
             break;
 
-        case STATE_CH3_DOOR:
-            DrawDoorSystem();
-            break;
-
         case STATE_CH3_BATTLE:
             DrawBattleSystem();
             break;
@@ -445,10 +520,6 @@ void DrawGame(void){
 
         case STATE_CHAPTER4_TRUTH:
             DrawDialogueBoxCh4();
-            break;
-
-        case STATE_CH4_DOOR:
-            DrawDoorSystem();
             break;
 
         case STATE_CH4_BATTLE:
@@ -463,10 +534,6 @@ void DrawGame(void){
             DrawDialogueBoxCh5();
             break;
 
-        case STATE_CH5_DOOR:
-            DrawDoorSystem();
-            break;
-
         case STATE_CH5_BATTLE:
             DrawBattleSystem();
             break;
@@ -476,8 +543,9 @@ void DrawGame(void){
             break;
 
         case STATE_CHOICE:{
-            ClearBackground(BLACK);
-            DrawText("What does Tonoy do?", 400, 220, 32, YELLOW);
+            ClearBackground((Color){9,8,11,255});
+            const char *question="What does Tonoy do?";
+            DrawText(question,640-MeasureText(question,32)/2,190,32,GOLD);
 
             const char *options[3]={
                 "1. Turn on the king alone  (Bad Ending)",
@@ -486,12 +554,18 @@ void DrawGame(void){
             };
 
             for(int i=0; i<3; i++){
-                Color c=(i==choiceSelected) ? YELLOW : WHITE;
-                DrawText(options[i], 400, 300+i*50, 22, c);
-                if(i==choiceSelected) DrawText(">", 370, 300+i*50, 22, YELLOW);
+                Rectangle button={300,275+i*90,680,64};
+                bool hover=i==choiceSelected;
+                Color buttonColor;
+                Color borderColor;
+                Color c;
+                if(hover){buttonColor=(Color){102,62,34,255};borderColor=GOLD;c=GOLD;}
+                else{buttonColor=(Color){35,31,34,255};borderColor=(Color){115,103,92,255};c=WHITE;}
+                DrawRectangleRounded(button,.14f,6,buttonColor);
+                DrawRectangleRoundedLinesEx(button,.14f,6,2,borderColor);
+                DrawText(options[i],330,296+i*90,20,c);
             }
-
-            DrawText("[UP/DOWN to choose, ENTER to confirm]", 400, 500, 18, PURPLE);
+            DrawText("Click an ending to continue",510,565,18,LIGHTGRAY);
             break;
         }
 
@@ -512,6 +586,14 @@ void DrawGame(void){
             DrawDialogueBoxSecret();
             break;
 
+        case STATE_THE_END:{
+            ClearBackground(BLACK);
+            const char *ending="THE END";
+            int width=MeasureText(ending, 72);
+            DrawText(ending, 640-width/2, 300, 72, GOLD);
+            break;
+        }
+
         default:
             break;
     }
@@ -523,36 +605,41 @@ void DrawGame(void){
 // ============================================
 void CloseGame(void){
     switch(state){
-        case STATE_LOADING:                               break;
-        case STATE_CINEMATIC:                             break;
         case STATE_TITLE:                                 break;
         case STATE_PROLOGUE:        CloseDialogue();       break;
+        case STATE_CHAPTER_CARD:                           break;
         case STATE_CHAPTER1_FOREST: CloseDialogueCh1();    break;
-        case STATE_CH1_DOOR:                              break;
         case STATE_CH1_BATTLE:                            break;
         case STATE_CH1_PUZZLE:                            break;
         case STATE_CHAPTER2_VILLAGE:CloseDialogueCh2();    break;
-        case STATE_CH2_DOOR:                              break;
         case STATE_CH2_BATTLE:                            break;
         case STATE_CH2_PUZZLE:                            break;
         case STATE_CHAPTER3_DIARY:  CloseDialogueCh3();  break;
-        case STATE_CH3_DOOR:                              break;
         case STATE_CH3_BATTLE:                            break;
         case STATE_CH3_PUZZLE:                            break;
         case STATE_CHAPTER4_TRUTH:  CloseDialogueCh4();  break;
-        case STATE_CH4_DOOR:                              break;
         case STATE_CH4_BATTLE:                            break;
         case STATE_CH4_PUZZLE:                            break;
         case STATE_CHAPTER5_FINAL:  CloseDialogueCh5();  break;
-        case STATE_CH5_DOOR:                              break;
         case STATE_CH5_BATTLE:                            break;
         case STATE_CH5_PUZZLE:                            break;
+        case STATE_ROUTE_CHOICE:                          break;
         case STATE_CHOICE:                                break;
         case STATE_BAD_ENDING_BATTLE:                     break;
         case STATE_REVENGE_BOSS_BATTLE:                   break;
         case STATE_ENDING_BAD:      CloseDialogueBad();  break;
         case STATE_ENDING_GOOD:     CloseDialogueGood(); break;
         case STATE_ENDING_SECRET:   CloseDialogueSecret();break;
+        case STATE_THE_END:                                break;
         default:                                          break;
     }
+    if(audioLoaded){
+        if(typingSound.frameCount>0)UnloadSound(typingSound);
+        if(backgroundMusic.frameCount>0)UnloadMusicStream(backgroundMusic);
+        audioLoaded=false;
+    }
+}
+
+bool ShouldGameQuit(void){
+    return quitRequested;
 }
